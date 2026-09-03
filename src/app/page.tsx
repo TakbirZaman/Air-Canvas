@@ -4,9 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 
 const COLORS = ["#a855f7", "#ef4444", "#22c55e", "#3b82f6", "#eab308", "#ffffff"];
-const PINCH_THRESHOLD = 0.05;
-const DRAW_WIDTH = 9; // bolder stroke per user request
+const PINCH_ENTER = 0.05; // distance to start drawing - tight pinch required
+const PINCH_EXIT = 0.07; // distance to stop drawing - hysteresis prevents flicker
+const DRAW_WIDTH = 9;
 const ERASE_RADIUS = 28;
+const SMOOTH_WINDOW = 4; // average last N fingertip positions
+const MIN_MOVE_PX = 3; // ignore tiny jitter < 3px
 
 type Point = { x: number; y: number };
 type Stroke = { color: string; erase: boolean; points: Point[] };
@@ -109,6 +112,10 @@ export default function AirCanvas() {
   // Hold counters to prevent accidental undo/clear when briefly showing gesture
   const undoHoldRef = useRef(0);
   const clearHoldRef = useRef(0);
+  // Smoothing & hysteresis to reduce sensor sensitivity / jitter
+  const tipHistoryRef = useRef<Point[]>([]);
+  const isPinchingRef = useRef(false);
+  const gestureStableRef = useRef<{ gesture: Gesture; count: number }>({ gesture: "idle", count: 0 });
 
   useEffect(() => {
     activeColorRef.current = activeColor;
@@ -242,31 +249,46 @@ export default function AirCanvas() {
 
         const indexTip = landmarks[INDEX_TIP];
         const thumbTip = landmarks[THUMB_TIP];
-        const x = (1 - indexTip.x) * drawCanvas.width;
-        const y = indexTip.y * drawCanvas.height;
+        const rawX = (1 - indexTip.x) * drawCanvas.width;
+        const rawY = indexTip.y * drawCanvas.height;
 
+        // --- Smoothing: moving average over last N positions to reduce jitter ---
+        tipHistoryRef.current.push({ x: rawX, y: rawY });
+        if (tipHistoryRef.current.length > SMOOTH_WINDOW) tipHistoryRef.current.shift();
+        const x = tipHistoryRef.current.reduce((s, p) => s + p.x, 0) / tipHistoryRef.current.length;
+        const y = tipHistoryRef.current.reduce((s, p) => s + p.y, 0) / tipHistoryRef.current.length;
+
+        // --- Pinch with hysteresis: prevents flicker when distance near threshold ---
         const pinchDistance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
-        const pinching = pinchDistance < PINCH_THRESHOLD;
+        if (isPinchingRef.current) {
+          if (pinchDistance > PINCH_EXIT) isPinchingRef.current = false;
+        } else {
+          if (pinchDistance < PINCH_ENTER) isPinchingRef.current = true;
+        }
+        const pinching = isPinchingRef.current;
 
         const indexExt = isFingerExtended(landmarks, INDEX_TIP, INDEX_MCP);
         const middleExt = isFingerExtended(landmarks, MIDDLE_TIP, MIDDLE_MCP);
         const ringExt = isFingerExtended(landmarks, RING_TIP, RING_MCP);
         const pinkyExt = isFingerExtended(landmarks, PINKY_TIP, PINKY_MCP);
 
-        // Gesture priority per user request:
-        // 1) Pinch 2 fingers (thumb + index) → draw / pen
-        // 2) 5 fingers open palm (all 4 fingers extended) → erase
-        // 3) Peace sign (2 fingers) → undo, Fist → clear, else idle
-        let gesture: Gesture = "idle";
+        // Gesture detection with stability filter - 5-finger erase removed per user request (was disturbing)
+        let rawGesture: Gesture = "idle";
         if (pinching) {
-          gesture = "draw"; // 🤏 pinch 2 fingers = pen
-        } else if (indexExt && middleExt && ringExt && pinkyExt) {
-          gesture = "erase"; // 🖐 5 fingers open palm = eraser
+          rawGesture = "draw";
         } else if (indexExt && middleExt && !ringExt && !pinkyExt) {
-          gesture = "undo"; // ✌️ peace sign
+          rawGesture = "undo";
         } else if (!indexExt && !middleExt && !ringExt && !pinkyExt) {
-          gesture = "clear"; // ✊ fist
+          rawGesture = "clear";
         }
+        if (rawGesture === gestureStableRef.current.gesture) {
+          gestureStableRef.current.count += 1;
+        } else {
+          gestureStableRef.current = { gesture: rawGesture, count: 1 };
+        }
+        // Draw reacts instantly (1 frame), others require 3 frames stability to avoid sensitivity
+        const requiredStable = rawGesture === "draw" || rawGesture === "idle" ? 1 : 3;
+        const gesture = gestureStableRef.current.count >= requiredStable ? rawGesture : prevGestureRef.current;
 
         // Continuous gestures (draw / erase): append to the active stroke.
         // FIX: drawings must persist when you release pinch (go to idle / no hand).
@@ -283,11 +305,14 @@ export default function AirCanvas() {
               points: [{ x, y }],
             };
           } else if (activeStrokeRef.current) {
-            activeStrokeRef.current.points.push({ x, y });
+            const last = activeStrokeRef.current.points[activeStrokeRef.current.points.length - 1];
+            const dx = x - last.x;
+            const dy = y - last.y;
+            // Ignore micro-movements < MIN_MOVE_PX to reduce sensor jitter
+            if (dx * dx + dy * dy >= MIN_MOVE_PX * MIN_MOVE_PX) {
+              activeStrokeRef.current.points.push({ x, y });
+            }
           }
-          // Simple & robust: repaint full active stroke each frame.
-          // This guarantees bold, continuous lines and no gaps that caused
-          // the "text disappears on unpin" bug with incremental logic.
           if (activeStrokeRef.current) paintStroke(dctx, activeStrokeRef.current);
         } else {
           finishActiveStroke();
@@ -343,6 +368,9 @@ export default function AirCanvas() {
         prevGestureRef.current = "idle";
         undoHoldRef.current = 0;
         clearHoldRef.current = 0;
+        tipHistoryRef.current = [];
+        isPinchingRef.current = false;
+        gestureStableRef.current = { gesture: "idle", count: 0 };
         setGestureLabel("No hand detected");
         setConfidence(null);
       }
@@ -405,7 +433,7 @@ export default function AirCanvas() {
             ? error
             : !isLoaded
             ? "Loading AI Models..."
-            : "Pinch 2 fingers to draw · 5 fingers to erase · ✌️ undo · ✊ clear"}
+            : "Pinch 2 fingers to draw · ✌️ undo · ✊ clear"}
         </p>
         <button
           onClick={toggleFullscreen}
@@ -420,7 +448,7 @@ export default function AirCanvas() {
           ? error
           : !isLoaded
           ? "Loading AI Models..."
-          : "Pinch 2 fingers to draw · 5 fingers to erase"}
+          : "Pinch 2 fingers to draw"}
       </p>
 
       <video ref={videoRef} className="hidden" playsInline />
@@ -477,7 +505,6 @@ export default function AirCanvas() {
         {/* Bottom legend */}
         <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex gap-4 text-xs text-gray-300 bg-black/40 backdrop-blur px-3 py-1.5 rounded-lg whitespace-nowrap">
           <span>2 fingers - draw</span>
-          <span>5 fingers - eraser</span>
           <span>undo</span>
           <span>clear</span>
         </div>
