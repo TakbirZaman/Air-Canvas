@@ -1,5 +1,7 @@
 # Air Canvas 🎨
 
+**Live Demo:** https://vercel.com/takbirzamans-projects/draw-in-air
+
 Draw in the air with your index finger, tracked live via your webcam using MediaPipe's HandLandmarker.
 
 Built with Next.js 16, React 19, MediaPipe Tasks Vision, and Tailwind CSS 4.
