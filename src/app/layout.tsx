@@ -3,7 +3,9 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Air Canvas — Draw in the Air",
-  description: "Draw in the air with your index finger, tracked live via webcam using MediaPipe HandLandmarker. Pinch to draw, ✌️ to undo, ✊ to clear.",
+  description: "Draw in the air with your index finger, tracked live via webcam using MediaPipe HandLandmarker. Pinch to draw, ✌️ to undo, ✊ to clear. Crafted by Takbir Zaman Bhuiyan — https://www.linkedin.com/in/takbir-zaman-bhuiyan/",
+  authors: [{ name: "Takbir Zaman Bhuiyan", url: "https://www.linkedin.com/in/takbir-zaman-bhuiyan/" }],
+  creator: "Takbir Zaman Bhuiyan",
 };
 
 export default function RootLayout({

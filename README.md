@@ -46,6 +46,12 @@ Built with Next.js 16, React 19, MediaPipe Tasks Vision, and Tailwind CSS 4.
 - **Live telemetry**: rolling-average FPS and hand-detection confidence are shown in the corner — small, but signals the tracking loop is actually being measured, not just assumed to work.
 - **Color picker** and **Save as PNG** round out the base gesture-drawing logic.
 
+## Author
+
+Crafted with passion by **[Takbir Zaman Bhuiyan](https://www.linkedin.com/in/takbir-zaman-bhuiyan/)** — connect with me on [LinkedIn](https://www.linkedin.com/in/takbir-zaman-bhuiyan/).
+
+---
+
 ## Next steps
 
 - Two-hand support: left hand for a radial color/thickness menu, right hand for drawing.

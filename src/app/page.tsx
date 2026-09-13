@@ -571,6 +571,24 @@ export default function AirCanvas() {
             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium text-white/60">Next.js 16 · MediaPipe · Tailwind 4</span>
           </div>
         </div>
+
+        {/* Signature */}
+        <footer className="flex items-center justify-center gap-2 py-4 text-center text-xs text-white/40">
+          <span>Crafted with passion by</span>
+          <a
+            href="https://www.linkedin.com/in/takbir-zaman-bhuiyan/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 font-semibold text-white/70 underline decoration-white/20 underline-offset-4 transition hover:text-violet-300 hover:decoration-violet-300/50"
+          >
+            Takbir Zaman Bhuiyan
+            <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current opacity-70">
+              <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.777 13.019H3.56V9h3.554v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z" />
+            </svg>
+          </a>
+          <span className="hidden sm:inline text-white/20">·</span>
+          <span className="hidden sm:inline">© {new Date().getFullYear()} Air Canvas</span>
+        </footer>
       </div>
 
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap'); *{font-family: Inter, system-ui, sans-serif}`}</style>

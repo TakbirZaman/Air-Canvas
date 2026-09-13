@@ -2,6 +2,10 @@
   "name": "air-canvas",
   "version": "0.1.0",
   "private": true,
+  "author": {
+    "name": "Takbir Zaman Bhuiyan",
+    "url": "https://www.linkedin.com/in/takbir-zaman-bhuiyan/"
+  },
   "scripts": {
     "dev": "next dev",
     "prebuild": "node scripts/download-model.mjs",
