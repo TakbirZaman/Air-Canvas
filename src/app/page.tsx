@@ -5,11 +5,19 @@ import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 
 const COLORS = ["#a855f7", "#ef4444", "#22c55e", "#3b82f6", "#eab308", "#ec4899", "#ffffff", "#171717"];
 const BRUSH_SIZES = [3, 7, 12, 18];
-const PINCH_ENTER = 0.05;
-const PINCH_EXIT = 0.07;
+const PINCH_ENTER_ABS = 0.05;
+const PINCH_EXIT_ABS = 0.07;
+// Depth-normalized pinch (thumb-index dist / wrist–middleMCP dist) — stable near/far.
+const PINCH_ENTER_RATIO = 0.32;
+const PINCH_EXIT_RATIO = 0.42;
 const ERASE_RADIUS = 28;
 const SMOOTH_WINDOW = 4;
 const MIN_MOVE_PX = 3;
+// Hold-to-fire: stable frames required, then single fire + cooldown.
+const UNDO_HOLD_FRAMES = 10;
+const CLEAR_HOLD_FRAMES = 15;
+const GESTURE_COOLDOWN_MS = 1000;
+const UI_THROTTLE_MS = 250;
 
 type Point = { x: number; y: number };
 type Stroke = { color: string; erase: boolean; points: Point[]; width: number };
@@ -77,6 +85,30 @@ function redrawAll(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, str
   for (const stroke of strokes) paintStroke(ctx, stroke);
 }
 
+// Incremental live segment — O(1) per frame instead of repainting the whole stroke.
+function paintSegment(ctx: CanvasRenderingContext2D, stroke: Stroke, fromIdx: number) {
+  const { points, color, erase, width } = stroke;
+  if (fromIdx < 0 || fromIdx + 1 >= points.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = erase ? ERASE_RADIUS : width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (fromIdx === 0 && points.length === 1) {
+    ctx.beginPath();
+    ctx.arc(points[0].x, points[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(points[fromIdx].x, points[fromIdx].y);
+    ctx.lineTo(points[fromIdx + 1].x, points[fromIdx + 1].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export default function AirCanvas() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -91,6 +123,10 @@ export default function AirCanvas() {
   const [fps, setFps] = useState(0);
   const [confidence, setConfidence] = useState<number | null>(null);
   const [hasHand, setHasHand] = useState(false);
+  const [primerDismissed, setPrimerDismissed] = useState(false);
+  const [saveWithBg, setSaveWithBg] = useState(false);
+  const [holdProgress, setHoldProgress] = useState(0);
+  const [touchActive, setTouchActive] = useState(false);
 
   const activeColorRef = useRef(activeColor);
   const brushWidthRef = useRef(brushWidth);
@@ -100,9 +136,21 @@ export default function AirCanvas() {
   const frameTimesRef = useRef<number[]>([]);
   const undoHoldRef = useRef(0);
   const clearHoldRef = useRef(0);
+  const lastUndoFireRef = useRef(0);
+  const lastClearFireRef = useRef(0);
   const tipHistoryRef = useRef<Point[]>([]);
   const isPinchingRef = useRef(false);
   const gestureStableRef = useRef<{ gesture: Gesture; count: number }>({ gesture: "idle", count: 0 });
+  const lastUiUpdateRef = useRef(0);
+  const pendingUiRef = useRef<{ gesture: Gesture; fps: number; conf: number | null; hand: boolean }>({
+    gesture: "idle",
+    fps: 0,
+    conf: null,
+    hand: false,
+  });
+  const touchStrokeRef = useRef<Stroke | null>(null);
+  const touchPointerIdRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<{ release?: () => Promise<void> } | null>(null);
 
   useEffect(() => {
     activeColorRef.current = activeColor;
@@ -112,10 +160,30 @@ export default function AirCanvas() {
   }, [brushWidth]);
 
   useEffect(() => {
+    if (!primerDismissed) return;
     let handLandmarker: HandLandmarker;
     let animationFrameId: number;
     let stream: MediaStream | null = null;
     let cancelled = false;
+
+    // Keep the screen awake while drawing (best-effort, silent fail).
+    const requestWakeLock = async () => {
+      try {
+        const nav = navigator as Navigator & {
+          wakeLock?: { request: (t: string) => Promise<{ release?: () => Promise<void> }> };
+        };
+        if (nav.wakeLock?.request) {
+          wakeLockRef.current = await nav.wakeLock.request("screen");
+        }
+      } catch {
+        /* unsupported or denied — ignore */
+      }
+    };
+    requestWakeLock();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") requestWakeLock();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     const initializeMediaPipe = async () => {
       try {
@@ -209,10 +277,10 @@ export default function AirCanvas() {
       const now = performance.now();
       frameTimesRef.current.push(now);
       if (frameTimesRef.current.length > 20) frameTimesRef.current.shift();
+      let currentFps = pendingUiRef.current.fps;
       if (frameTimesRef.current.length >= 2) {
         const span = frameTimesRef.current[frameTimesRef.current.length - 1] - frameTimesRef.current[0];
-        const avgFps = span > 0 ? ((frameTimesRef.current.length - 1) * 1000) / span : 0;
-        setFps(Math.round(avgFps));
+        currentFps = span > 0 ? Math.round(((frameTimesRef.current.length - 1) * 1000) / span) : 0;
       }
 
       vctx.save();
@@ -226,12 +294,23 @@ export default function AirCanvas() {
 
       cctx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
 
+      const flushUi = (gesture: Gesture, conf: number | null, hand: boolean, progress: number) => {
+        pendingUiRef.current = { gesture, fps: currentFps, conf, hand };
+        if (now - lastUiUpdateRef.current >= UI_THROTTLE_MS) {
+          lastUiUpdateRef.current = now;
+          setGestureLabel(pendingUiRef.current.gesture);
+          setFps(pendingUiRef.current.fps);
+          setConfidence(pendingUiRef.current.conf);
+          setHasHand(pendingUiRef.current.hand);
+          setHoldProgress(progress);
+        }
+      };
+
       const results = handLandmarker.detectForVideo(video, now);
 
       if (results.landmarks && results.landmarks.length > 0) {
-        setHasHand(true);
         const landmarks = results.landmarks[0];
-        setConfidence(results.handednesses?.[0]?.[0]?.score ?? null);
+        const conf = results.handednesses?.[0]?.[0]?.score ?? null;
 
         const indexTip = landmarks[INDEX_TIP];
         const thumbTip = landmarks[THUMB_TIP];
@@ -243,11 +322,16 @@ export default function AirCanvas() {
         const x = tipHistoryRef.current.reduce((s, p) => s + p.x, 0) / tipHistoryRef.current.length;
         const y = tipHistoryRef.current.reduce((s, p) => s + p.y, 0) / tipHistoryRef.current.length;
 
-        const pinchDistance = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+        // Depth-normalized pinch: absolute guard + hand-size ratio so near/far both work.
+        const pinchAbs = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+        const wrist = landmarks[WRIST];
+        const middleMcp = landmarks[MIDDLE_MCP];
+        const handSize = Math.hypot(middleMcp.x - wrist.x, middleMcp.y - wrist.y) || 1;
+        const pinchRatio = pinchAbs / handSize;
         if (isPinchingRef.current) {
-          if (pinchDistance > PINCH_EXIT) isPinchingRef.current = false;
+          if (pinchRatio > PINCH_EXIT_RATIO && pinchAbs > PINCH_EXIT_ABS) isPinchingRef.current = false;
         } else {
-          if (pinchDistance < PINCH_ENTER) isPinchingRef.current = true;
+          if (pinchRatio < PINCH_ENTER_RATIO && pinchAbs < PINCH_EXIT_ABS) isPinchingRef.current = true;
         }
         const pinching = isPinchingRef.current;
 
@@ -259,6 +343,7 @@ export default function AirCanvas() {
         let rawGesture: Gesture = "idle";
         if (pinching) rawGesture = "draw";
         else if (indexExt && middleExt && !ringExt && !pinkyExt) rawGesture = "undo";
+        else if (indexExt && middleExt && ringExt && pinkyExt) rawGesture = "erase";
         else if (!indexExt && !middleExt && !ringExt && !pinkyExt) rawGesture = "clear";
 
         if (rawGesture === gestureStableRef.current.gesture) gestureStableRef.current.count += 1;
@@ -267,6 +352,7 @@ export default function AirCanvas() {
         const requiredStable = rawGesture === "draw" || rawGesture === "idle" ? 1 : 3;
         const gesture = gestureStableRef.current.count >= requiredStable ? rawGesture : prevGestureRef.current;
 
+        let progress = 0;
         if (gesture === "draw" || gesture === "erase") {
           undoHoldRef.current = 0;
           clearHoldRef.current = 0;
@@ -278,25 +364,40 @@ export default function AirCanvas() {
               points: [{ x, y }],
               width: brushWidthRef.current,
             };
+            if (activeStrokeRef.current) paintSegment(dctx, activeStrokeRef.current, 0);
           } else if (activeStrokeRef.current) {
             const last = activeStrokeRef.current.points[activeStrokeRef.current.points.length - 1];
             const dx = x - last.x;
             const dy = y - last.y;
-            if (dx * dx + dy * dy >= MIN_MOVE_PX * MIN_MOVE_PX) activeStrokeRef.current.points.push({ x, y });
+            if (dx * dx + dy * dy >= MIN_MOVE_PX * MIN_MOVE_PX) {
+              activeStrokeRef.current.points.push({ x, y });
+              paintSegment(dctx, activeStrokeRef.current, activeStrokeRef.current.points.length - 2);
+            }
           }
-          if (activeStrokeRef.current) paintStroke(dctx, activeStrokeRef.current);
         } else {
           finishActiveStroke();
           if (gesture === "undo") {
             undoHoldRef.current += 1;
-            if (undoHoldRef.current === 8 && prevGestureRef.current !== "undo") {
+            progress = Math.min(1, undoHoldRef.current / UNDO_HOLD_FRAMES);
+            if (
+              undoHoldRef.current >= UNDO_HOLD_FRAMES &&
+              prevGestureRef.current !== "undo" &&
+              now - lastUndoFireRef.current > GESTURE_COOLDOWN_MS
+            ) {
+              lastUndoFireRef.current = now;
               strokesRef.current.pop();
               redrawAll(drawCanvas, dctx, strokesRef.current);
             }
           } else undoHoldRef.current = 0;
           if (gesture === "clear") {
             clearHoldRef.current += 1;
-            if (clearHoldRef.current === 12 && prevGestureRef.current !== "clear") {
+            progress = Math.max(progress, Math.min(1, clearHoldRef.current / CLEAR_HOLD_FRAMES));
+            if (
+              clearHoldRef.current >= CLEAR_HOLD_FRAMES &&
+              prevGestureRef.current !== "clear" &&
+              now - lastClearFireRef.current > GESTURE_COOLDOWN_MS
+            ) {
+              lastClearFireRef.current = now;
               strokesRef.current = [];
               dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
             }
@@ -304,13 +405,21 @@ export default function AirCanvas() {
         }
 
         prevGestureRef.current = gesture;
-        setGestureLabel(gesture);
+        flushUi(gesture, conf, true, progress);
 
         cctx.beginPath();
         const cursorRadius = gesture === "erase" ? ERASE_RADIUS / 2 : brushWidthRef.current + 4;
         cctx.arc(x, y, cursorRadius, 0, 2 * Math.PI);
         const cursorColor =
-          gesture === "draw" ? activeColorRef.current : gesture === "undo" ? "#3b82f6" : gesture === "clear" ? "#ef4444" : "#ffffff";
+          gesture === "draw"
+            ? activeColorRef.current
+            : gesture === "erase"
+              ? "#f4f4f5"
+              : gesture === "undo"
+                ? "#3b82f6"
+                : gesture === "clear"
+                  ? "#ef4444"
+                  : "#ffffff";
         cctx.strokeStyle = cursorColor;
         cctx.lineWidth = 2.5;
         cctx.shadowColor = cursorColor;
@@ -329,9 +438,7 @@ export default function AirCanvas() {
         tipHistoryRef.current = [];
         isPinchingRef.current = false;
         gestureStableRef.current = { gesture: "idle", count: 0 };
-        setGestureLabel("idle");
-        setHasHand(false);
-        setConfidence(null);
+        flushUi("idle", null, false, 0);
       }
 
       animationFrameId = requestAnimationFrame(predictWebcam);
@@ -340,17 +447,20 @@ export default function AirCanvas() {
     initializeMediaPipe();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
       if (handLandmarker) handLandmarker.close();
       stream?.getTracks().forEach((t) => t.stop());
+      wakeLockRef.current?.release?.().catch(() => {});
     };
-  }, []);
+  }, [primerDismissed]);
 
   const clearCanvas = () => {
     const canvas = drawCanvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (canvas && ctx) {
       strokesRef.current = [];
+      touchStrokeRef.current = null;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
   };
@@ -364,19 +474,74 @@ export default function AirCanvas() {
   };
   const saveDrawing = () => {
     const canvas = drawCanvasRef.current;
+    const videoCanvas = videoCanvasRef.current;
     if (!canvas) return;
-    // composite: create offscreen canvas with black background + strokes
     const out = document.createElement("canvas");
     out.width = canvas.width;
     out.height = canvas.height;
     const octx = out.getContext("2d")!;
-    octx.fillStyle = "#0a0a0a";
-    octx.fillRect(0, 0, out.width, out.height);
+    if (saveWithBg && videoCanvas && videoCanvas.width > 0) {
+      octx.drawImage(videoCanvas, 0, 0, out.width, out.height);
+    } else {
+      octx.fillStyle = "#0a0a0a";
+      octx.fillRect(0, 0, out.width, out.height);
+    }
     octx.drawImage(canvas, 0, 0);
     const link = document.createElement("a");
     link.download = `air-canvas-${Date.now()}.png`;
     link.href = out.toDataURL("image/png");
     link.click();
+  };
+
+  // Touch / mouse fallback — draw directly when camera/hand is unavailable.
+  const canvasPointFromEvent = (e: React.PointerEvent, canvas: HTMLCanvasElement): Point | null => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return {
+      x: ((e.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((e.clientY - rect.top) / rect.height) * canvas.height,
+    };
+  };
+  const onTouchStart = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas || touchPointerIdRef.current !== null) return;
+    const ctx = canvas.getContext("2d");
+    const pt = canvasPointFromEvent(e, canvas);
+    if (!ctx || !pt) return;
+    touchPointerIdRef.current = e.pointerId;
+    (e.target as HTMLCanvasElement).setPointerCapture?.(e.pointerId);
+    touchStrokeRef.current = {
+      color: activeColorRef.current,
+      erase: false,
+      points: [pt],
+      width: Math.max(brushWidthRef.current * 1.5, 6),
+    };
+    setTouchActive(true);
+    paintSegment(ctx, touchStrokeRef.current, 0);
+  };
+  const onTouchMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = drawCanvasRef.current;
+    if (!canvas || e.pointerId !== touchPointerIdRef.current || !touchStrokeRef.current) return;
+    const ctx = canvas.getContext("2d");
+    const pt = canvasPointFromEvent(e, canvas);
+    if (!ctx || !pt) return;
+    const pts = touchStrokeRef.current.points;
+    const last = pts[pts.length - 1];
+    const dx = pt.x - last.x;
+    const dy = pt.y - last.y;
+    if (dx * dx + dy * dy >= MIN_MOVE_PX * MIN_MOVE_PX) {
+      pts.push(pt);
+      paintSegment(ctx, touchStrokeRef.current, pts.length - 2);
+    }
+  };
+  const endTouchStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerId !== touchPointerIdRef.current) return;
+    touchPointerIdRef.current = null;
+    setTouchActive(false);
+    if (touchStrokeRef.current && touchStrokeRef.current.points.length > 0) {
+      strokesRef.current.push(touchStrokeRef.current);
+    }
+    touchStrokeRef.current = null;
   };
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
@@ -388,7 +553,12 @@ export default function AirCanvas() {
     erase: { label: "Erasing", sub: "Open palm", color: "text-zinc-200", icon: "◯" },
     undo: { label: "Undo", sub: "Hold ✌️", color: "text-blue-300", icon: "↩" },
     clear: { label: "Clear", sub: "Hold ✊", color: "text-red-300", icon: "⌫" },
-    idle: { label: hasHand ? "Idle" : "No hand", sub: hasHand ? "Release pinch" : "Show your hand", color: "text-zinc-400", icon: "○" },
+    idle: {
+      label: touchActive ? "Touch draw" : hasHand ? "Idle" : "No hand",
+      sub: touchActive ? "Finger on screen" : hasHand ? "Release pinch" : "Show hand or draw with finger",
+      color: "text-zinc-400",
+      icon: "○",
+    },
   };
   const meta = gestureMeta[gestureLabel];
 
@@ -449,7 +619,7 @@ export default function AirCanvas() {
 
       {/* Mobile status bar — hidden in landscape to save vertical space */}
       <div className="relative z-10 flex items-center justify-between border-b border-white/[0.04] bg-black/10 px-4 py-2 backdrop-blur portrait:flex landscape:hidden md:hidden">
-        <span className="truncate text-xs text-white/60">{error ? error : !isLoaded ? "Loading AI models…" : "Pinch thumb + index to draw"}</span>
+        <span className="truncate text-xs text-white/60">{error ? error : !isLoaded ? "Loading AI models…" : touchActive ? "Touch drawing…" : "Pinch to draw · or touch screen"}</span>
         <span className="ml-2 shrink-0 text-xs font-bold">{fps} fps</span>
       </div>
 
@@ -460,8 +630,16 @@ export default function AirCanvas() {
         {/* Fits both orientations: tall in portrait, height-capped 16:9 in landscape. No rotation needed. */}
         <div className="relative mx-auto w-full max-w-full overflow-hidden rounded-[20px] border border-white/10 bg-black shadow-[0_20px_80px_rgba(0,0,0,0.6)] portrait:aspect-[3/4] portrait:max-h-[calc(100dvh-170px)] landscape:mx-auto landscape:h-[calc(100dvh-150px)] landscape:w-auto landscape:aspect-[16/9] landscape:max-w-full sm:portrait:aspect-[4/3] md:h-auto md:max-h-none md:portrait:aspect-[16/10] md:portrait:max-h-none md:landscape:h-auto md:landscape:w-full md:landscape:aspect-[16/10] md:rounded-[28px] lg:aspect-[16/8.5]">
           <canvas ref={videoCanvasRef} className="absolute inset-0 block h-full w-full" />
-          <canvas ref={drawCanvasRef} className="absolute inset-0 block h-full w-full" />
-          <canvas ref={cursorCanvasRef} className="absolute inset-0 block h-full w-full" />
+          <canvas
+            ref={drawCanvasRef}
+            className="absolute inset-0 block h-full w-full cursor-crosshair"
+            style={{ touchAction: "none" }}
+            onPointerDown={onTouchStart}
+            onPointerMove={onTouchMove}
+            onPointerUp={endTouchStroke}
+            onPointerCancel={endTouchStroke}
+          />
+          <canvas ref={cursorCanvasRef} className="pointer-events-none absolute inset-0 block h-full w-full" />
 
           {/* Top left — color + brush: compact horizontal strip on phones, vertical panel on desktop */}
           <div className="canvas-overlay absolute left-2 top-2 md:left-4 md:top-4">
@@ -494,13 +672,18 @@ export default function AirCanvas() {
             </div>
           </div>
 
-          {/* Top right — gesture status: compact on phones */}
+          {/* Top right — gesture status: compact on phones, with hold progress */}
           <div className="absolute right-2 top-2 flex flex-col items-end gap-2 md:right-4 md:top-4">
             <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-2.5 py-2 backdrop-blur-xl md:gap-3 md:px-4 md:py-3">
               <div className={`flex h-8 w-8 items-center justify-center rounded-xl border bg-white/5 text-base md:h-10 md:w-10 md:text-lg ${meta.color} border-white/10`}>{meta.icon}</div>
               <div className="text-right leading-tight">
                 <div className={`text-xs font-bold md:text-sm ${meta.color}`}>{meta.label}</div>
                 <div className="hidden text-xs text-white/50 sm:block">{meta.sub}</div>
+                {(gestureLabel === "undo" || gestureLabel === "clear") && holdProgress > 0 && (
+                  <div className="mt-1 h-1 w-20 overflow-hidden rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-current transition-[width]" style={{ width: `${Math.round(holdProgress * 100)}%` }} />
+                  </div>
+                )}
               </div>
               <div className={`ml-1 h-2 w-2 rounded-full ${gestureLabel === "draw" ? "animate-pulse bg-violet-400" : hasHand ? "bg-emerald-400" : "bg-zinc-600"}`} />
             </div>
@@ -520,6 +703,8 @@ export default function AirCanvas() {
               <span className="hidden text-white/80 md:inline">Draw</span>
             </span>
             <span className="h-4 w-px bg-white/10" />
+            <span className="whitespace-nowrap text-white/70">🖐 Erase</span>
+            <span className="h-4 w-px bg-white/10" />
             <span className="whitespace-nowrap text-white/70">✌️ Undo</span>
             <span className="h-4 w-px bg-white/10" />
             <span className="whitespace-nowrap text-white/70">✊ Clear</span>
@@ -527,6 +712,13 @@ export default function AirCanvas() {
 
           {/* Bottom actions: full-width row in portrait, compact floating-right in landscape */}
           <div className="canvas-overlay absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5 portrait:inset-x-2 landscape:inset-x-auto landscape:right-2 landscape:bottom-2 md:inset-x-auto md:bottom-4 md:right-4 md:gap-2">
+            <button
+              onClick={() => setSaveWithBg((v) => !v)}
+              title={saveWithBg ? "Save includes camera background" : "Save strokes only"}
+              className={`rounded-full border px-3 py-2 text-xs font-bold backdrop-blur-xl transition landscape:flex-none sm:flex-none md:px-4 md:py-2.5 ${saveWithBg ? "border-violet-400/40 bg-violet-600/80" : "border-white/10 bg-black/50 hover:bg-white/10"}`}
+            >
+              {saveWithBg ? "🖼 BG on" : "BG off"}
+            </button>
             <button onClick={undoLast} className="flex-1 rounded-full border border-white/10 bg-black/50 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-white/10 landscape:flex-none sm:flex-none md:px-5 md:py-2.5">
               ↩ Undo
             </button>
@@ -538,11 +730,34 @@ export default function AirCanvas() {
             </button>
           </div>
 
-          {/* Loading / error overlay */}
-          {(!isLoaded || error) && (
+          {/* Primer / loading / error overlay */}
+          {(!primerDismissed || !isLoaded || error) && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6">
               <div className="w-full max-w-md rounded-3xl border border-white/10 bg-zinc-900 p-6 text-center shadow-2xl">
-                {!error ? (
+                {!primerDismissed ? (
+                  <>
+                    <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-600 to-indigo-600 text-2xl">
+                      🎨
+                    </div>
+                    <h3 className="text-lg font-bold">Draw in the air</h3>
+                    <p className="mt-2 text-sm leading-relaxed text-white/60">
+                      Pinch thumb + index to draw · open palm 🖐 to erase · ✌️ holds undo · ✊ holds clear. No camera? Just draw with your finger on the canvas.
+                    </p>
+                    <p className="mt-3 text-xs text-white/30">Needs HTTPS + camera permission (iOS Safari: allow camera when asked).</p>
+                    <button
+                      onClick={() => setPrimerDismissed(true)}
+                      className="mt-4 rounded-full bg-white px-6 py-2.5 text-sm font-bold text-black transition hover:bg-zinc-100"
+                    >
+                      Enable camera + start
+                    </button>
+                    <button
+                      onClick={() => setPrimerDismissed(true)}
+                      className="mt-2 block w-full text-xs font-medium text-white/40 underline-offset-4 hover:underline"
+                    >
+                      Skip camera — touch draw only
+                    </button>
+                  </>
+                ) : !error ? (
                   <>
                     <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-600 to-indigo-600">
                       <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/30 border-t-white" />
@@ -558,9 +773,15 @@ export default function AirCanvas() {
                     <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/20 text-xl">⚠️</div>
                     <h3 className="text-lg font-bold text-red-300">Something went wrong</h3>
                     <p className="mt-2 text-sm leading-relaxed text-white/60">{error}</p>
-                    <button onClick={() => window.location.reload()} className="mt-4 rounded-full bg-white px-5 py-2 text-sm font-bold text-black">
-                      Retry
-                    </button>
+                    <p className="mt-2 text-xs text-white/40">You can still draw with touch even without the camera.</p>
+                    <div className="mt-4 flex items-center justify-center gap-2">
+                      <button onClick={() => setError(null)} className="rounded-full border border-white/10 bg-white/5 px-5 py-2 text-sm font-bold">
+                        Continue offline
+                      </button>
+                      <button onClick={() => window.location.reload()} className="rounded-full bg-white px-5 py-2 text-sm font-bold text-black">
+                        Retry
+                      </button>
+                    </div>
                   </>
                 )}
               </div>
@@ -571,7 +792,7 @@ export default function AirCanvas() {
         {/* Helper bar below canvas — hidden on short landscape phones to let canvas fit, shown otherwise */}
         <div className="flex-col items-center justify-between gap-3 rounded-2xl border border-white/5 bg-white/[0.03] px-4 py-3 backdrop-blur portrait:flex md:flex-row landscape:hidden md:flex">
           <p className="text-center text-xs leading-relaxed text-white/50 md:text-left">
-            <span className="font-semibold text-white/80">Tip:</span> Hold pinch steady to draw smooth lines · Keep hand centered and well-lit · Works best in Chrome/Edge
+            <span className="font-semibold text-white/80">Tip:</span> Pinch to draw · open palm to erase · or draw with finger on touch · keep hand centered and well-lit
           </p>
           <div className="flex items-center gap-2 text-xs">
             <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 font-medium text-white/60">Next.js 16 · MediaPipe · Tailwind 4</span>
