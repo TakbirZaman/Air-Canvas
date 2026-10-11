@@ -16,4 +16,22 @@ body {
   font-family: Inter, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+canvas {
+  display: block;
+  touch-action: none;
+}
+
+button {
+  touch-action: manipulation;
+  min-height: 44px;
+}
+
+/* compact icon-only buttons inside the canvas overlay can stay small */
+.canvas-overlay button {
+  min-height: 0;
 }

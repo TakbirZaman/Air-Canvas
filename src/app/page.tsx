@@ -146,12 +146,17 @@ export default function AirCanvas() {
       }
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 1280, height: 720, facingMode: "user" },
+          video: {
+            facingMode: "user",
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
         });
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = () => {
-            videoRef.current?.play();
+            videoRef.current?.play().catch(() => {});
             predictWebcam();
           };
         }
@@ -388,7 +393,7 @@ export default function AirCanvas() {
   const meta = gestureMeta[gestureLabel];
 
   return (
-    <main className="relative min-h-screen w-screen overflow-hidden bg-[#050508] text-white selection:bg-violet-500/30">
+    <main className="relative flex min-h-dvh w-full flex-col overflow-x-clip bg-[#050508] text-white selection:bg-violet-500/30">
       {/* Background gradients */}
       <div className="pointer-events-none absolute inset-0">
         <div className="absolute inset-0 bg-gradient-to-br from-violet-950/30 via-transparent to-blue-950/20" />
@@ -448,53 +453,54 @@ export default function AirCanvas() {
         <span className="text-xs font-bold">{fps} fps</span>
       </div>
 
-      <video ref={videoRef} className="hidden" playsInline muted />
+      <video ref={videoRef} className="hidden" playsInline muted autoPlay disablePictureInPicture />
 
       {/* Canvas area */}
-      <div className="relative z-10 mx-auto flex max-w-[1280px] flex-col gap-4 p-3 md:p-6">
-        <div className="relative aspect-[16/9] w-full overflow-hidden rounded-[28px] border border-white/10 bg-black shadow-[0_20px_80px_rgba(0,0,0,0.6)] md:aspect-[16/8.5]">
-          <canvas ref={videoCanvasRef} className="absolute inset-0 h-full w-full object-cover" />
-          <canvas ref={drawCanvasRef} className="absolute inset-0 h-full w-full object-cover" />
-          <canvas ref={cursorCanvasRef} className="absolute inset-0 h-full w-full object-cover" />
+      <div className="relative z-10 mx-auto flex w-full max-w-[1280px] flex-col gap-3 p-3 md:gap-4 md:p-6">
+        {/* Portrait-friendly canvas: tall on phones, wide on desktop. No rotation needed. */}
+        <div className="relative aspect-[3/4] w-full overflow-hidden rounded-[20px] border border-white/10 bg-black shadow-[0_20px_80px_rgba(0,0,0,0.6)] sm:aspect-[4/3] md:rounded-[28px] lg:aspect-[16/8.5]">
+          <canvas ref={videoCanvasRef} className="absolute inset-0 block h-full w-full" />
+          <canvas ref={drawCanvasRef} className="absolute inset-0 block h-full w-full" />
+          <canvas ref={cursorCanvasRef} className="absolute inset-0 block h-full w-full" />
 
-          {/* Top left — color + brush */}
-          <div className="absolute left-3 top-3 flex flex-col gap-3 md:left-4 md:top-4">
-            <div className="flex flex-col items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-2.5 py-3 backdrop-blur-xl">
-              <span className="text-[10px] font-bold tracking-widest text-white/40">COLOR</span>
-              <div className="grid grid-cols-2 gap-2">
+          {/* Top left — color + brush: compact horizontal strip on phones, vertical panel on desktop */}
+          <div className="canvas-overlay absolute left-2 top-2 md:left-4 md:top-4">
+            <div className="flex max-w-[46vw] flex-row items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-black/40 px-2 py-2 backdrop-blur-xl sm:max-w-none md:max-w-none md:flex-col md:gap-2 md:px-2.5 md:py-3">
+              <span className="hidden text-[10px] font-bold tracking-widest text-white/40 md:block">COLOR</span>
+              <div className="grid shrink-0 grid-cols-4 gap-1.5 md:grid-cols-2 md:gap-2">
                 {COLORS.map((c) => (
                   <button
                     key={c}
                     onClick={() => setActiveColor(c)}
-                    className={`h-7 w-7 rounded-full border-2 transition-all md:h-8 md:w-8 ${activeColor === c ? "scale-110 border-white shadow-lg" : "border-white/10 hover:border-white/30"}`}
+                    className={`h-6 w-6 rounded-full border-2 transition-all md:h-8 md:w-8 ${activeColor === c ? "scale-110 border-white shadow-lg" : "border-white/10 hover:border-white/30"}`}
                     style={{ backgroundColor: c, boxShadow: activeColor === c ? `0 0 12px ${c}80` : undefined }}
                     aria-label={`Color ${c}`}
                   />
                 ))}
               </div>
-              <div className="mt-1 h-px w-full bg-white/10" />
-              <span className="text-[10px] font-bold tracking-widest text-white/40">SIZE</span>
-              <div className="flex flex-col gap-1.5">
+              <div className="h-8 w-px shrink-0 bg-white/10 md:h-px md:w-full" />
+              <span className="hidden text-[10px] font-bold tracking-widest text-white/40 md:block">SIZE</span>
+              <div className="flex shrink-0 flex-row gap-1.5 md:flex-col">
                 {BRUSH_SIZES.map((s) => (
                   <button
                     key={s}
                     onClick={() => setBrushWidth(s)}
-                    className={`flex h-7 w-7 items-center justify-center rounded-full border transition md:h-8 md:w-8 ${brushWidth === s ? "border-white bg-white text-black" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
+                    className={`flex h-6 w-6 items-center justify-center rounded-full border transition md:h-8 md:w-8 ${brushWidth === s ? "border-white bg-white text-black" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}
                   >
-                    <span className="rounded-full bg-current" style={{ width: Math.min(s, 14), height: Math.min(s, 14) }} />
+                    <span className="rounded-full bg-current" style={{ width: Math.min(s, 12), height: Math.min(s, 12) }} />
                   </button>
                 ))}
               </div>
             </div>
           </div>
 
-          {/* Top right — gesture status */}
-          <div className="absolute right-3 top-3 flex flex-col items-end gap-2 md:right-4 md:top-4">
-            <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/40 px-4 py-3 backdrop-blur-xl">
-              <div className={`flex h-10 w-10 items-center justify-center rounded-xl border bg-white/5 text-lg ${meta.color} border-white/10`}>{meta.icon}</div>
+          {/* Top right — gesture status: compact on phones */}
+          <div className="absolute right-2 top-2 flex flex-col items-end gap-2 md:right-4 md:top-4">
+            <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-black/40 px-2.5 py-2 backdrop-blur-xl md:gap-3 md:px-4 md:py-3">
+              <div className={`flex h-8 w-8 items-center justify-center rounded-xl border bg-white/5 text-base md:h-10 md:w-10 md:text-lg ${meta.color} border-white/10`}>{meta.icon}</div>
               <div className="text-right leading-tight">
-                <div className={`text-sm font-bold ${meta.color}`}>{meta.label}</div>
-                <div className="text-xs text-white/50">{meta.sub}</div>
+                <div className={`text-xs font-bold md:text-sm ${meta.color}`}>{meta.label}</div>
+                <div className="hidden text-xs text-white/50 sm:block">{meta.sub}</div>
               </div>
               <div className={`ml-1 h-2 w-2 rounded-full ${gestureLabel === "draw" ? "animate-pulse bg-violet-400" : hasHand ? "bg-emerald-400" : "bg-zinc-600"}`} />
             </div>
@@ -507,8 +513,8 @@ export default function AirCanvas() {
             </div>
           </div>
 
-          {/* Bottom center — legend */}
-          <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/10 bg-black/50 px-2 py-1.5 text-[11px] font-medium backdrop-blur-xl md:bottom-4 md:gap-2 md:px-4 md:text-xs">
+          {/* Bottom center — legend: lifted above action buttons on phones to avoid overlap */}
+          <div className="absolute bottom-[68px] left-1/2 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-white/10 bg-black/50 px-2 py-1.5 text-[11px] font-medium backdrop-blur-xl sm:bottom-[72px] md:bottom-4 md:gap-2 md:px-4 md:text-xs">
             <span className="flex items-center gap-1.5 whitespace-nowrap">
               <span className="rounded-full bg-violet-600 px-2 py-0.5 text-[10px] font-bold text-white">PINCH</span>
               <span className="hidden text-white/80 md:inline">Draw</span>
@@ -519,15 +525,15 @@ export default function AirCanvas() {
             <span className="whitespace-nowrap text-white/70">✊ Clear</span>
           </div>
 
-          {/* Bottom right — actions */}
-          <div className="absolute bottom-3 right-3 flex items-center gap-2 md:bottom-4 md:right-4">
-            <button onClick={undoLast} className="rounded-full border border-white/10 bg-black/50 px-4 py-2.5 text-xs font-bold backdrop-blur-xl transition hover:bg-white/10 md:px-5">
+          {/* Bottom right — actions: full-width row on phones, floating on desktop */}
+          <div className="canvas-overlay absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5 md:inset-x-auto md:bottom-4 md:right-4 md:gap-2">
+            <button onClick={undoLast} className="flex-1 rounded-full border border-white/10 bg-black/50 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-white/10 sm:flex-none md:px-5 md:py-2.5">
               ↩ Undo
             </button>
-            <button onClick={clearCanvas} className="rounded-full border border-red-500/20 bg-red-600/90 px-4 py-2.5 text-xs font-bold backdrop-blur-xl transition hover:bg-red-600 md:px-5">
+            <button onClick={clearCanvas} className="flex-1 rounded-full border border-red-500/20 bg-red-600/90 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-red-600 sm:flex-none md:px-5 md:py-2.5">
               Clear
             </button>
-            <button onClick={saveDrawing} className="rounded-full bg-white px-5 py-2.5 text-xs font-bold text-black shadow-lg transition hover:bg-zinc-100">
+            <button onClick={saveDrawing} className="flex-1 rounded-full bg-white px-4 py-2 text-xs font-bold text-black shadow-lg transition hover:bg-zinc-100 sm:flex-none md:px-5 md:py-2.5">
               ⬇ Save
             </button>
           </div>
