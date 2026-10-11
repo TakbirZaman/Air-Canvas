@@ -447,25 +447,25 @@ export default function AirCanvas() {
         </div>
       </header>
 
-      {/* Mobile status bar */}
-      <div className="relative z-10 flex items-center justify-between border-b border-white/[0.04] bg-black/10 px-4 py-2 backdrop-blur md:hidden">
-        <span className="text-xs text-white/60">{error ? error : !isLoaded ? "Loading AI models…" : "Pinch thumb + index to draw"}</span>
-        <span className="text-xs font-bold">{fps} fps</span>
+      {/* Mobile status bar — hidden in landscape to save vertical space */}
+      <div className="relative z-10 flex items-center justify-between border-b border-white/[0.04] bg-black/10 px-4 py-2 backdrop-blur portrait:flex landscape:hidden md:hidden">
+        <span className="truncate text-xs text-white/60">{error ? error : !isLoaded ? "Loading AI models…" : "Pinch thumb + index to draw"}</span>
+        <span className="ml-2 shrink-0 text-xs font-bold">{fps} fps</span>
       </div>
 
       <video ref={videoRef} className="hidden" playsInline muted autoPlay disablePictureInPicture />
 
       {/* Canvas area */}
-      <div className="relative z-10 mx-auto flex w-full max-w-[1280px] flex-col gap-3 p-3 md:gap-4 md:p-6">
-        {/* Portrait-friendly canvas: tall on phones, wide on desktop. No rotation needed. */}
-        <div className="relative aspect-[3/4] w-full overflow-hidden rounded-[20px] border border-white/10 bg-black shadow-[0_20px_80px_rgba(0,0,0,0.6)] sm:aspect-[4/3] md:rounded-[28px] lg:aspect-[16/8.5]">
+      <div className="relative z-10 mx-auto flex w-full max-w-[1280px] flex-1 flex-col gap-3 p-3 md:gap-4 md:p-6">
+        {/* Fits both orientations: tall in portrait, height-capped 16:9 in landscape. No rotation needed. */}
+        <div className="relative mx-auto w-full max-w-full overflow-hidden rounded-[20px] border border-white/10 bg-black shadow-[0_20px_80px_rgba(0,0,0,0.6)] portrait:aspect-[3/4] portrait:max-h-[calc(100dvh-170px)] landscape:mx-auto landscape:h-[calc(100dvh-150px)] landscape:w-auto landscape:aspect-[16/9] landscape:max-w-full sm:portrait:aspect-[4/3] md:h-auto md:max-h-none md:portrait:aspect-[16/10] md:portrait:max-h-none md:landscape:h-auto md:landscape:w-full md:landscape:aspect-[16/10] md:rounded-[28px] lg:aspect-[16/8.5]">
           <canvas ref={videoCanvasRef} className="absolute inset-0 block h-full w-full" />
           <canvas ref={drawCanvasRef} className="absolute inset-0 block h-full w-full" />
           <canvas ref={cursorCanvasRef} className="absolute inset-0 block h-full w-full" />
 
           {/* Top left — color + brush: compact horizontal strip on phones, vertical panel on desktop */}
           <div className="canvas-overlay absolute left-2 top-2 md:left-4 md:top-4">
-            <div className="flex max-w-[46vw] flex-row items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-black/40 px-2 py-2 backdrop-blur-xl sm:max-w-none md:max-w-none md:flex-col md:gap-2 md:px-2.5 md:py-3">
+            <div className="flex max-w-[46vw] flex-row items-center gap-2 overflow-x-auto rounded-2xl border border-white/10 bg-black/40 px-2 py-2 backdrop-blur-xl landscape:max-w-[36vw] sm:max-w-none md:max-w-none md:flex-col md:gap-2 md:px-2.5 md:py-3">
               <span className="hidden text-[10px] font-bold tracking-widest text-white/40 md:block">COLOR</span>
               <div className="grid shrink-0 grid-cols-4 gap-1.5 md:grid-cols-2 md:gap-2">
                 {COLORS.map((c) => (
@@ -513,8 +513,8 @@ export default function AirCanvas() {
             </div>
           </div>
 
-          {/* Bottom center — legend: lifted above action buttons on phones to avoid overlap */}
-          <div className="absolute bottom-[68px] left-1/2 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-white/10 bg-black/50 px-2 py-1.5 text-[11px] font-medium backdrop-blur-xl sm:bottom-[72px] md:bottom-4 md:gap-2 md:px-4 md:text-xs">
+          {/* Bottom center — legend: portrait only on phones (saves height in landscape), always on md+ */}
+          <div className="absolute bottom-[68px] left-1/2 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-white/10 bg-black/50 px-2 py-1.5 text-[11px] font-medium backdrop-blur-xl portrait:flex landscape:hidden sm:bottom-[72px] md:bottom-4 md:gap-2 md:px-4 md:text-xs md:portrait:flex md:landscape:flex">
             <span className="flex items-center gap-1.5 whitespace-nowrap">
               <span className="rounded-full bg-violet-600 px-2 py-0.5 text-[10px] font-bold text-white">PINCH</span>
               <span className="hidden text-white/80 md:inline">Draw</span>
@@ -525,15 +525,15 @@ export default function AirCanvas() {
             <span className="whitespace-nowrap text-white/70">✊ Clear</span>
           </div>
 
-          {/* Bottom right — actions: full-width row on phones, floating on desktop */}
-          <div className="canvas-overlay absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5 md:inset-x-auto md:bottom-4 md:right-4 md:gap-2">
-            <button onClick={undoLast} className="flex-1 rounded-full border border-white/10 bg-black/50 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-white/10 sm:flex-none md:px-5 md:py-2.5">
+          {/* Bottom actions: full-width row in portrait, compact floating-right in landscape */}
+          <div className="canvas-overlay absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5 portrait:inset-x-2 landscape:inset-x-auto landscape:right-2 landscape:bottom-2 md:inset-x-auto md:bottom-4 md:right-4 md:gap-2">
+            <button onClick={undoLast} className="flex-1 rounded-full border border-white/10 bg-black/50 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-white/10 landscape:flex-none sm:flex-none md:px-5 md:py-2.5">
               ↩ Undo
             </button>
-            <button onClick={clearCanvas} className="flex-1 rounded-full border border-red-500/20 bg-red-600/90 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-red-600 sm:flex-none md:px-5 md:py-2.5">
+            <button onClick={clearCanvas} className="flex-1 rounded-full border border-red-500/20 bg-red-600/90 px-3 py-2 text-xs font-bold backdrop-blur-xl transition hover:bg-red-600 landscape:flex-none sm:flex-none md:px-5 md:py-2.5">
               Clear
             </button>
-            <button onClick={saveDrawing} className="flex-1 rounded-full bg-white px-4 py-2 text-xs font-bold text-black shadow-lg transition hover:bg-zinc-100 sm:flex-none md:px-5 md:py-2.5">
+            <button onClick={saveDrawing} className="flex-1 rounded-full bg-white px-4 py-2 text-xs font-bold text-black shadow-lg transition hover:bg-zinc-100 landscape:flex-none sm:flex-none md:px-5 md:py-2.5">
               ⬇ Save
             </button>
           </div>
@@ -568,8 +568,8 @@ export default function AirCanvas() {
           )}
         </div>
 
-        {/* Helper bar below canvas */}
-        <div className="flex flex-col items-center justify-between gap-3 rounded-2xl border border-white/5 bg-white/[0.03] px-4 py-3 backdrop-blur md:flex-row">
+        {/* Helper bar below canvas — hidden on short landscape phones to let canvas fit, shown otherwise */}
+        <div className="flex-col items-center justify-between gap-3 rounded-2xl border border-white/5 bg-white/[0.03] px-4 py-3 backdrop-blur portrait:flex md:flex-row landscape:hidden md:flex">
           <p className="text-center text-xs leading-relaxed text-white/50 md:text-left">
             <span className="font-semibold text-white/80">Tip:</span> Hold pinch steady to draw smooth lines · Keep hand centered and well-lit · Works best in Chrome/Edge
           </p>
